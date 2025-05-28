@@ -1,0 +1,12 @@
+{
+  "supabase": {
+    "command": "your_supabase_mcp_server_command_here",
+    "args": ["--arg1", "value1"],
+    "env": {}
+  },
+  "stripe": {
+    "command": "your_stripe_mcp_server_command_here",
+    "args": ["--option", "setting"],
+    "env": {}
+  }
+}
