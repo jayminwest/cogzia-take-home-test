@@ -149,7 +149,7 @@ class MCPServerManager:
                 "tools": {}
             },
             "clientInfo": {
-                "name": "cogznia-mcp-client",
+                "name": "cogzia-mcp-client",
                 "version": "1.0.0"
             }
         })
