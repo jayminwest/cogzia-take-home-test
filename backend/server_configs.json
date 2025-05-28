@@ -1,0 +1,27 @@
+{
+  "stripe": {
+    "name": "stripe",
+    "server_type": "stripe",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@stripe/mcp",
+      "--tools=all"
+    ],
+    "env_vars": {},
+    "description": "Stripe payment processing tools",
+    "enabled": true
+  },
+  "Git MCP": {
+    "name": "Git MCP",
+    "server_type": "git-mcp",
+    "command": "npx",
+    "args": [
+      "-y",
+      "git-mcp-server"
+    ],
+    "env_vars": {},
+    "description": "Git repository operations and management tools",
+    "enabled": true
+  }
+}
