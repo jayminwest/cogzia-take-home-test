@@ -2,15 +2,26 @@ import json
 import os
 import subprocess
 import asyncio
+import logging
+import threading
 from typing import Dict, Any, Optional, List
 import uuid
 from server_registry import ServerRegistry
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 class MCPServerManager:
     def __init__(self, server_registry: ServerRegistry = None):
         self.servers: Dict[str, subprocess.Popen] = {}
         self.registry = server_registry or ServerRegistry()
+        self.server_logs: Dict[str, List[str]] = {}  # Store server stderr logs
+        self._log_threads: Dict[str, threading.Thread] = {}  # Track log monitoring threads
 
     def get_server_config(self, server_name: str) -> dict:
         """Get server configuration in legacy format"""
@@ -62,6 +73,8 @@ class MCPServerManager:
         env = self._prepare_env(server_nickname)
 
         # Start the server process
+        logger.info(f"Starting MCP server '{server_nickname}' with command: {config.command} {' '.join(config.args)}")
+        
         process = subprocess.Popen(
             [config.command] + config.args,
             stdin=subprocess.PIPE,
@@ -72,18 +85,69 @@ class MCPServerManager:
             bufsize=1
         )
 
+        # Initialize log storage for this server
+        self.server_logs[server_nickname] = []
+        
+        # Start monitoring stderr in a separate thread
+        self._start_stderr_monitoring(server_nickname, process)
+        
         self.servers[server_nickname] = process
+        logger.info(f"MCP server '{server_nickname}' started successfully with PID {process.pid}")
         return process
+
+    def _start_stderr_monitoring(self, server_nickname: str, process: subprocess.Popen):
+        """Start monitoring stderr output from an MCP server in a separate thread"""
+        def monitor_stderr():
+            try:
+                while True:
+                    line = process.stderr.readline()
+                    if not line:
+                        break
+                    
+                    # Store the stderr line
+                    stderr_msg = line.strip()
+                    if stderr_msg:
+                        self.server_logs[server_nickname].append(stderr_msg)
+                        
+                        # Log based on content
+                        if any(keyword in stderr_msg.lower() for keyword in ['error', 'failed', 'exception', 'traceback']):
+                            logger.error(f"MCP server '{server_nickname}' stderr: {stderr_msg}")
+                        elif any(keyword in stderr_msg.lower() for keyword in ['warning', 'warn']):
+                            logger.warning(f"MCP server '{server_nickname}' stderr: {stderr_msg}")
+                        else:
+                            logger.debug(f"MCP server '{server_nickname}' stderr: {stderr_msg}")
+                        
+                        # Keep only last 100 log entries per server to prevent memory issues
+                        if len(self.server_logs[server_nickname]) > 100:
+                            self.server_logs[server_nickname] = self.server_logs[server_nickname][-100:]
+                            
+            except Exception as e:
+                logger.error(f"Error monitoring stderr for server '{server_nickname}': {e}")
+        
+        thread = threading.Thread(target=monitor_stderr, daemon=True)
+        thread.start()
+        self._log_threads[server_nickname] = thread
+        logger.debug(f"Started stderr monitoring thread for server '{server_nickname}'")
 
     async def stop_server(self, server_nickname: str):
         """Stop an MCP server"""
         if server_nickname in self.servers:
+            logger.info(f"Stopping MCP server '{server_nickname}'")
             process = self.servers[server_nickname]
             process.terminate()
             await asyncio.sleep(0.5)
             if process.poll() is None:
+                logger.warning(f"MCP server '{server_nickname}' did not terminate gracefully, killing...")
                 process.kill()
+            
+            # Clean up tracking data
             del self.servers[server_nickname]
+            if server_nickname in self.server_logs:
+                del self.server_logs[server_nickname]
+            if server_nickname in self._log_threads:
+                del self._log_threads[server_nickname]
+            
+            logger.info(f"MCP server '{server_nickname}' stopped successfully")
 
     async def stop_all_servers(self):
         """Stop all running MCP servers"""
@@ -117,6 +181,8 @@ class MCPServerManager:
         # Send request
         try:
             request_str = json.dumps(request) + "\n"
+            logger.debug(f"Sending request to '{server_nickname}': {method} with params: {params}")
+            
             process.stdin.write(request_str)
             process.stdin.flush()
 
@@ -128,17 +194,40 @@ class MCPServerManager:
             )
 
             if not response_line:
-                raise Exception("No response from MCP server")
+                error_msg = f"No response from MCP server '{server_nickname}' for method '{method}'"
+                logger.error(error_msg)
+                # Include recent stderr logs if available
+                if server_nickname in self.server_logs and self.server_logs[server_nickname]:
+                    recent_logs = self.server_logs[server_nickname][-5:]  # Last 5 stderr messages
+                    logger.error(f"Recent stderr from '{server_nickname}': {recent_logs}")
+                raise Exception(error_msg)
 
+            logger.debug(f"Received response from '{server_nickname}': {response_line.strip()}")
             response = json.loads(response_line)
 
             # Check for errors
             if "error" in response:
-                raise Exception(f"MCP server error: {response['error']}")
+                error_msg = f"MCP server '{server_nickname}' error for method '{method}': {response['error']}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
 
+            logger.debug(f"Successfully processed request to '{server_nickname}' for method '{method}'")
             return response.get("result", {})
 
-        except Exception:
+        except asyncio.TimeoutError:
+            error_msg = f"Timeout waiting for response from MCP server '{server_nickname}' for method '{method}'"
+            logger.error(error_msg)
+            # Include recent stderr logs if available
+            if server_nickname in self.server_logs and self.server_logs[server_nickname]:
+                recent_logs = self.server_logs[server_nickname][-5:]
+                logger.error(f"Recent stderr from '{server_nickname}': {recent_logs}")
+            raise Exception(error_msg)
+        except json.JSONDecodeError as e:
+            error_msg = f"Invalid JSON response from MCP server '{server_nickname}': {e}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        except Exception as e:
+            logger.error(f"Unexpected error communicating with MCP server '{server_nickname}': {e}")
             raise
 
     async def initialize_server(self, server_nickname: str) -> Dict[str, Any]:
@@ -193,7 +282,45 @@ class MCPServerManager:
                 tools = await self.list_tools(server_name)
                 all_tools[server_name] = tools
             except Exception as e:
-                print(f"Error getting tools from {server_name}: {e}")
+                error_msg = f"Error getting tools from {server_name}: {e}"
+                logger.error(error_msg)
                 all_tools[server_name] = {"error": str(e), "tools": []}
 
         return all_tools
+
+    def get_server_logs(self, server_nickname: str = None) -> Dict[str, List[str]]:
+        """Get stderr logs from MCP servers"""
+        if server_nickname:
+            return {server_nickname: self.server_logs.get(server_nickname, [])}
+        return self.server_logs.copy()
+
+    def get_server_status(self, server_nickname: str) -> Dict[str, Any]:
+        """Get detailed status information for a specific server"""
+        config = self.registry.get_server_config(server_nickname)
+        if not config:
+            return {"error": f"Server '{server_nickname}' not found"}
+        
+        is_running = server_nickname in self.servers
+        process = self.servers.get(server_nickname)
+        
+        status = {
+            "name": server_nickname,
+            "type": config.server_type,
+            "description": config.description,
+            "enabled": config.enabled,
+            "running": is_running,
+            "command": config.command,
+            "args": config.args,
+        }
+        
+        if is_running and process:
+            status.update({
+                "pid": process.pid,
+                "poll": process.poll(),  # None if still running, exit code if terminated
+            })
+            
+            # Include recent logs if available
+            if server_nickname in self.server_logs:
+                status["recent_logs"] = self.server_logs[server_nickname][-10:]  # Last 10 entries
+        
+        return status

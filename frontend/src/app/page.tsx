@@ -25,6 +25,13 @@ interface ServerTemplate {
   description: string;
 }
 
+interface Toast {
+  id: string;
+  type: 'success' | 'error' | 'info';
+  message: string;
+  duration?: number;
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -35,6 +42,27 @@ export default function Home() {
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [newServerName, setNewServerName] = useState("");
   const [newServerType, setNewServerType] = useState("");
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [expandedMessages, setExpandedMessages] = useState<Set<number>>(new Set());
+  const [editingServer, setEditingServer] = useState<string | null>(null);
+  const [serverDetails, setServerDetails] = useState<Record<string, unknown>>({});
+
+  // Toast management
+  const addToast = useCallback((type: Toast['type'], message: string, duration = 5000) => {
+    const id = Date.now().toString();
+    const toast: Toast = { id, type, message, duration };
+    setToasts(prev => [...prev, toast]);
+    
+    if (duration > 0) {
+      setTimeout(() => {
+        setToasts(prev => prev.filter(t => t.id !== id));
+      }, duration);
+    }
+  }, []);
+
+  const removeToast = useCallback((id: string) => {
+    setToasts(prev => prev.filter(toast => toast.id !== id));
+  }, []);
 
   // Fetch available servers
   const fetchServers = useCallback(async () => {
@@ -56,11 +84,99 @@ export default function Home() {
         if (selectedServers.length === 0) {
           setSelectedServers(enabledServers);
         }
+      } else {
+        addToast('error', data.error || 'Failed to fetch servers');
       }
     } catch (error) {
       console.error("Error fetching servers:", error);
+      addToast('error', 'Failed to connect to server');
     }
-  }, [selectedServers.length]);
+  }, [selectedServers.length, addToast]);
+
+  // JSON content detection and parsing
+  const isJsonString = (str: string): boolean => {
+    try {
+      const trimmed = str.trim();
+      return (trimmed.startsWith('{') && trimmed.endsWith('}')) || 
+             (trimmed.startsWith('[') && trimmed.endsWith(']'));
+    } catch {
+      return false;
+    }
+  };
+
+  const parseJsonSafely = (str: string): unknown => {
+    try {
+      return JSON.parse(str);
+    } catch {
+      return null;
+    }
+  };
+
+  // JSON Tree Viewer Component
+  const JsonTreeViewer = ({ data, level = 0 }: { data: unknown; level?: number }) => {
+    const [collapsed, setCollapsed] = useState(level > 2);
+    
+    if (data === null) return <span className="text-gray-500">null</span>;
+    if (data === undefined) return <span className="text-gray-500">undefined</span>;
+    
+    if (typeof data !== 'object') {
+      return (
+        <span className={`${
+          typeof data === 'string' ? 'text-green-600 dark:text-green-400' :
+          typeof data === 'number' ? 'text-blue-600 dark:text-blue-400' :
+          typeof data === 'boolean' ? 'text-purple-600 dark:text-purple-400' :
+          'text-gray-600 dark:text-gray-400'
+        }`}>
+          {typeof data === 'string' ? `"${data}"` : String(data)}
+        </span>
+      );
+    }
+    
+    const isArray = Array.isArray(data);
+    const entries = isArray ? data.map((item, index) => [index, item]) : Object.entries(data);
+    const isEmpty = entries.length === 0;
+    
+    if (isEmpty) {
+      return <span className="text-gray-500">{isArray ? '[]' : '{}'}</span>;
+    }
+    
+    return (
+      <div className="font-mono text-sm">
+        <span 
+          className="cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 rounded px-1"
+          onClick={() => setCollapsed(!collapsed)}
+        >
+          {collapsed ? '▶' : '▼'} {isArray ? `[${entries.length}]` : `{${entries.length}}`}
+        </span>
+        {!collapsed && (
+          <div className="ml-4 mt-1 border-l border-gray-300 dark:border-gray-600 pl-2">
+            {entries.map(([key, value]) => (
+              <div key={String(key)} className="py-1">
+                <span className="text-gray-700 dark:text-gray-300 font-medium">
+                  {isArray ? `[${key}]:` : `"${key}":`}
+                </span>
+                <span className="ml-2">
+                  <JsonTreeViewer data={value} level={level + 1} />
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const toggleMessageExpansion = (index: number) => {
+    setExpandedMessages(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(index)) {
+        newSet.delete(index);
+      } else {
+        newSet.add(index);
+      }
+      return newSet;
+    });
+  };
 
   // Fetch server templates
   const fetchTemplates = useCallback(async () => {
@@ -69,11 +185,14 @@ export default function Home() {
       const data = await res.json();
       if (data.success) {
         setTemplates(data.templates);
+      } else {
+        addToast('error', data.error || 'Failed to fetch server templates');
       }
     } catch (error) {
       console.error("Error fetching templates:", error);
+      addToast('error', 'Failed to connect to server');
     }
-  }, []);
+  }, [addToast]);
 
   // Add a new server
   const addServer = async () => {
@@ -93,14 +212,91 @@ export default function Home() {
       if (data.success) {
         setNewServerName("");
         setNewServerType("");
+        addToast('success', `Server "${newServerName}" added successfully`);
         fetchServers(); // Refresh server list
       } else {
-        alert(data.error || "Failed to add server");
+        addToast('error', data.error || "Failed to add server");
       }
     } catch (error) {
       console.error("Error adding server:", error);
-      alert("Error adding server");
+      addToast('error', 'Failed to connect to server');
     }
+  };
+
+  // Toggle server enable/disable
+  const toggleServerStatus = async (serverName: string, enabled: boolean) => {
+    try {
+      const res = await fetch(`http://localhost:8000/servers/${serverName}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled })
+      });
+      
+      const data = await res.json();
+      if (data.success) {
+        addToast('success', `Server "${serverName}" ${enabled ? 'enabled' : 'disabled'}`);
+        fetchServers();
+      } else {
+        addToast('error', data.error || `Failed to ${enabled ? 'enable' : 'disable'} server`);
+      }
+    } catch (error) {
+      console.error("Error toggling server status:", error);
+      addToast('error', 'Failed to connect to server');
+    }
+  };
+
+  // Delete server
+  const deleteServer = async (serverName: string) => {
+    if (!confirm(`Are you sure you want to delete server "${serverName}"?`)) {
+      return;
+    }
+    
+    try {
+      const res = await fetch(`http://localhost:8000/servers/${serverName}`, {
+        method: "DELETE"
+      });
+      
+      const data = await res.json();
+      if (data.success) {
+        addToast('success', `Server "${serverName}" deleted successfully`);
+        // Remove from selected servers if it was selected
+        setSelectedServers(prev => prev.filter(s => s !== serverName));
+        fetchServers();
+      } else {
+        addToast('error', data.error || 'Failed to delete server');
+      }
+    } catch (error) {
+      console.error("Error deleting server:", error);
+      addToast('error', 'Failed to connect to server');
+    }
+  };
+
+  // Fetch detailed server status
+  const fetchServerDetails = async (serverName: string) => {
+    try {
+      const res = await fetch(`http://localhost:8000/servers/${serverName}/status`);
+      const data = await res.json();
+      if (data.success) {
+        setServerDetails(prev => ({ ...prev, [serverName]: data.status as Record<string, unknown> }));
+      } else {
+        addToast('error', data.error || 'Failed to fetch server details');
+      }
+    } catch (error) {
+      console.error("Error fetching server details:", error);
+      addToast('error', 'Failed to connect to server');
+    }
+  };
+
+  // Start editing a server
+  const startEditingServer = (serverName: string) => {
+    setEditingServer(serverName);
+    fetchServerDetails(serverName);
+  };
+
+  // Cancel editing
+  const cancelEditing = () => {
+    setEditingServer(null);
+    setServerDetails({});
   };
 
   // Load data on component mount
@@ -347,9 +543,33 @@ export default function Home() {
                           <div className="text-xs text-gray-600 dark:text-gray-300 mt-1">{server.description}</div>
                         </div>
                         <div className="flex flex-col items-end space-y-1 ml-3">
-                          <span className={`text-xs px-2 py-1 rounded-full ${server.enabled ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'}`}>
-                            {server.enabled ? 'Enabled' : 'Disabled'}
-                          </span>
+                          <div className="flex items-center space-x-2">
+                            <button
+                              onClick={() => toggleServerStatus(name, !server.enabled)}
+                              className={`text-xs px-2 py-1 rounded-full transition-colors ${
+                                server.enabled 
+                                  ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 hover:bg-green-200 dark:hover:bg-green-800' 
+                                  : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-800'
+                              }`}
+                              title={`Click to ${server.enabled ? 'disable' : 'enable'}`}
+                            >
+                              {server.enabled ? 'Enabled' : 'Disabled'}
+                            </button>
+                            <button
+                              onClick={() => startEditingServer(name)}
+                              className="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-800 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-700 transition-colors"
+                              title="Edit server details"
+                            >
+                              ✏
+                            </button>
+                            <button
+                              onClick={() => deleteServer(name)}
+                              className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 hover:bg-red-100 hover:text-red-700 dark:hover:bg-red-900 dark:hover:text-red-300 transition-colors"
+                              title="Delete server"
+                            >
+                              ✕
+                            </button>
+                          </div>
                           {server.running && (
                             <span className="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
                               Running
@@ -435,8 +655,38 @@ export default function Home() {
                           </span>
                         </div>
                       )}
-                      <div className="whitespace-pre-wrap break-words text-sm lg:text-base">
-                        {message.content}
+                      <div className="text-sm lg:text-base">
+                        {message.role === "tool" && isJsonString(message.content) ? (
+                          <div>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-xs text-gray-600 dark:text-gray-400">JSON Response</span>
+                              <button
+                                onClick={() => toggleMessageExpansion(index)}
+                                className="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                              >
+                                {expandedMessages.has(index) ? 'Collapse' : 'Expand Tree'}
+                              </button>
+                            </div>
+                            {expandedMessages.has(index) ? (
+                              <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 overflow-auto max-h-96">
+                                <JsonTreeViewer data={parseJsonSafely(message.content)} />
+                              </div>
+                            ) : (
+                              <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 overflow-auto max-h-32">
+                                <pre className="whitespace-pre-wrap break-words text-xs font-mono text-gray-700 dark:text-gray-300">
+                                  {message.content.length > 200 ? 
+                                    message.content.substring(0, 200) + '...' : 
+                                    message.content
+                                  }
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="whitespace-pre-wrap break-words">
+                            {message.content}
+                          </div>
+                        )}
                       </div>
                       <div className={`text-xs mt-2 ${
                         message.role === "user" ? "text-blue-200" : "text-gray-500 dark:text-gray-400"
@@ -507,6 +757,184 @@ export default function Home() {
         </div>
         </main>
       </div>
+
+      {/* Toast Notifications */}
+      <div className="fixed top-4 right-4 z-50 space-y-2">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`
+              flex items-center p-4 rounded-lg shadow-lg min-w-80 max-w-md
+              transform transition-all duration-300 ease-in-out
+              ${
+                toast.type === 'success'
+                  ? 'bg-green-50 border border-green-200 text-green-800 dark:bg-green-900/80 dark:border-green-700 dark:text-green-200'
+                  : toast.type === 'error'
+                  ? 'bg-red-50 border border-red-200 text-red-800 dark:bg-red-900/80 dark:border-red-700 dark:text-red-200'
+                  : 'bg-blue-50 border border-blue-200 text-blue-800 dark:bg-blue-900/80 dark:border-blue-700 dark:text-blue-200'
+              }
+            `}
+          >
+            <div className="flex-shrink-0 mr-3">
+              {toast.type === 'success' && (
+                <svg className="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              )}
+              {toast.type === 'error' && (
+                <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              )}
+              {toast.type === 'info' && (
+                <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              )}
+            </div>
+            <div className="flex-1 text-sm font-medium">
+              {toast.message}
+            </div>
+            <button
+              onClick={() => removeToast(toast.id)}
+              className="flex-shrink-0 ml-3 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Server Details Modal */}
+      {editingServer && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-lg max-w-2xl w-full max-h-[80vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-bold text-gray-900 dark:text-white">
+                  Server Details: {editingServer}
+                </h2>
+                <button
+                  onClick={cancelEditing}
+                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              
+              {serverDetails[editingServer] ? (
+                <div>
+                {/* eslint-disable @typescript-eslint/no-explicit-any */}
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                        Server Type
+                      </label>
+                      <div className="text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                        {(serverDetails[editingServer] as any)?.type}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                        Status
+                      </label>
+                      <div className={`text-sm p-2 rounded ${
+                        (serverDetails[editingServer] as any)?.running 
+                          ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300' 
+                          : 'bg-gray-50 text-gray-700 dark:bg-gray-700 dark:text-gray-300'
+                      }`}>
+                        {(serverDetails[editingServer] as any)?.running ? 'Running' : 'Stopped'}
+                        {(serverDetails[editingServer] as any)?.pid && ` (PID: ${(serverDetails[editingServer] as any)?.pid})`}
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Description
+                    </label>
+                    <div className="text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                      {(serverDetails[editingServer] as any)?.description}
+                    </div>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Command
+                    </label>
+                    <div className="text-sm font-mono text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                      {(serverDetails[editingServer] as any)?.command}
+                    </div>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Arguments
+                    </label>
+                    <div className="text-sm font-mono text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                      {(serverDetails[editingServer] as any)?.args?.join(' ') || 'No arguments'}
+                    </div>
+                  </div>
+                  
+                  {(serverDetails[editingServer] as any)?.recent_logs && (serverDetails[editingServer] as any)?.recent_logs.length > 0 && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                        Recent Logs
+                      </label>
+                      <div className="bg-gray-900 text-green-400 p-3 rounded font-mono text-xs max-h-40 overflow-y-auto">
+                        {(serverDetails[editingServer] as any)?.recent_logs.map((log: string, index: number) => (
+                          <div key={index} className="mb-1">
+                            {log}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="flex space-x-3 pt-4 border-t border-gray-200 dark:border-gray-600">
+                    <button
+                      onClick={() => {
+                        addToast('info', 'Refreshing server details...');
+                        fetchServerDetails(editingServer);
+                      }}
+                      className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                    >
+                      Refresh Details
+                    </button>
+                    <button
+                      onClick={() => toggleServerStatus(editingServer, !(serverDetails[editingServer] as any)?.enabled)}
+                      className={`px-4 py-2 rounded transition-colors ${
+                        (serverDetails[editingServer] as any)?.enabled
+                          ? 'bg-red-600 text-white hover:bg-red-700'
+                          : 'bg-green-600 text-white hover:bg-green-700'
+                      }`}
+                    >
+                      {(serverDetails[editingServer] as any)?.enabled ? 'Disable' : 'Enable'} Server
+                    </button>
+                    <button
+                      onClick={cancelEditing}
+                      className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition-colors"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+                {/* eslint-enable @typescript-eslint/no-explicit-any */}
+                </div>
+              ) : (
+                <div className="flex items-center justify-center py-8">
+                  <div className="text-gray-500 dark:text-gray-400">Loading server details...</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

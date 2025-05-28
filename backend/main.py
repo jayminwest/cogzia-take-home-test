@@ -262,6 +262,54 @@ async def update_server_status(server_name: str, request: ServerStatusRequest):
             "error": str(e)
         }
 
+
+@app.get("/servers/{server_name}/status")
+async def get_server_status(server_name: str):
+    """Get detailed status and logs for a specific server"""
+    try:
+        status = mcp_manager.get_server_status(server_name)
+        return {
+            "success": True,
+            "status": status
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/servers/{server_name}/logs")
+async def get_server_logs(server_name: str):
+    """Get stderr logs for a specific server"""
+    try:
+        logs = mcp_manager.get_server_logs(server_name)
+        return {
+            "success": True,
+            "logs": logs
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/servers/logs")
+async def get_all_server_logs():
+    """Get stderr logs for all servers"""
+    try:
+        logs = mcp_manager.get_server_logs()
+        return {
+            "success": True,
+            "logs": logs
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 # Get available tools for the AI model
 async def get_available_tools(enabled_servers: List[str] = None):
     tools = []
