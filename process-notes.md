@@ -25,3 +25,5 @@
 - Multiple configurable MCP's working within chat (11:47)
 - Running cleanup on project, linting, type checking, and organizing (11:50)
 - Linting checks and cleanup complete (12:00)
+- Cleaning up frontend and making it more modern (12:10)
+- Frontend looking much better (12:15)
